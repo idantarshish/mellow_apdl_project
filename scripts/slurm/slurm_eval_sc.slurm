@@ -6,16 +6,16 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=20:00:00
-#SBATCH --output=/home/yandex/APDL2526a/sapirtalmi/mellow_apdl_project/logs/slurm-%j_inference.out
-#SBATCH --error=/home/yandex/APDL2526a/sapirtalmi/mellow_apdl_project/logs/slurm-%j_inference.err
+#SBATCH --output=/home/yandex/APDL2526a/idantarshish/mellow_apdl_project/logs/slurm-%j_inference.out
+#SBATCH --error=/home/yandex/APDL2526a/idantarshish/mellow_apdl_project/logs/slurm-%j_inference.err
 
 # Project and venv paths
-PROJECT_DIR=/home/yandex/APDL2526a/sapirtalmi/mellow_apdl_project
-VENV=/home/yandex/APDL2526a/sapirtalmi/mellow_env
+PROJECT_DIR=/home/yandex/APDL2526a/idantarshish/mellow_apdl_project
+VENV=/home/yandex/MLWG2025/idantarshish/anaconda3/envs/my_mellow_env
 PYTHON=$VENV/bin/python
 
 # HuggingFace cache on fast storage (not home dir)
-export HF_HOME=/home/yandex/APDL2526a/sapirtalmi/hf_cache
+export HF_HOME=/home/yandex/APDL2526a/idantarshish/hf_cache
 export TRANSFORMERS_CACHE=$HF_HOME
 
 echo "=== SLURM Job Info ==="
@@ -30,4 +30,4 @@ cd $PROJECT_DIR
 $PYTHON train.py \
     --config config/eval_sc_1gpu.yaml \
     --checkpoint_path /home/yandex/APDL2526a/sapirtalmi/mellow_apdl_project/outputs/2026-04-01_12-23-01/model--epo-10.ckpt \
-    --save-dir /home/yandex/APDL2526a/sapirtalmi/mellow_apdl_project/outputs
+    --save-dir /home/yandex/APDL2526a/idantarshish/mellow_apdl_project/outputs

@@ -6,6 +6,7 @@ import logging
 from tqdm import tqdm
 from datetime import datetime
 from collections import Counter
+from itertools import product
 
 import distributed
 from utils.launch_utils import parse_args, multiprocessing_init, parse_mode
@@ -116,14 +117,14 @@ def main():
     args, conf = parse_args()
     args = parse_mode(args)
 
-    # Default values for Self-Consistency
-    args.sc_n = getattr(args, 'sc_n', 5)
-    args.sc_temperature = getattr(args, 'sc_temperature', 0.7)
-    args.sc_top_p = getattr(args, 'sc_top_p', 0.9)
+    # 1. Define the Grid Parameters
+    N_LIST = [1, 3, 5]
+    TEMP_LIST = [1.0, 0.7, 0.5]
+    TOP_P_LIST = [0.8]
 
-    args.job_id = f"SC_EVAL_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-    args.save_dir = os.path.join(args.save_dir, args.job_id)
-    os.makedirs(args.save_dir, exist_ok=True)
+    # Set up a base directory for the entire grid search
+    base_job_id = f"SC_GRID_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    base_save_dir = os.path.join(args.save_dir, base_job_id)
 
     configure_logging()
     multiprocessing_init()
@@ -138,14 +139,37 @@ def main():
         if distributed_ctx.rank() > 0:
             logging.getLogger().setLevel(logging.ERROR)
 
+        # We initialize the Trainer once outside the loop to keep the model in memory
         with Trainer(vars(args), distributed_ctx=distributed_ctx) as trainer:
-            try:
-                run_self_consistency_eval(trainer, args)
-            except Exception:
-                logging.error("Error during SC evaluation", exc_info=sys.exc_info())
-                if args.reraise_exceptions:
-                    raise
-                return -1
+
+            # 2. Iterate through the parameter product
+            for n, temp, top_p in product(N_LIST, TEMP_LIST, TOP_P_LIST):
+
+                # Update current args for this iteration
+                args.sc_n = n
+                args.sc_temperature = temp
+                args.sc_top_p = top_p
+
+                # Create a unique sub-directory for this combination to prevent overwriting
+                param_suffix = f"n{n}_temp{temp}_p{top_p}"
+                args.save_dir = os.path.join(base_save_dir, param_suffix)
+
+                if distributed_ctx.rank() == 0:
+                    os.makedirs(args.save_dir, exist_ok=True)
+                    trainer.logger.info(f"\n" + "=" * 50)
+                    trainer.logger.info(f"RUNNING GRID POINT: N={n}, Temp={temp}, Top_P={top_p}")
+                    trainer.logger.info(f"Saving to: {args.save_dir}")
+                    trainer.logger.info("=" * 50)
+
+                try:
+                    run_self_consistency_eval(trainer, args)
+                except Exception:
+                    logging.error(f"Error during SC evaluation for {param_suffix}", exc_info=sys.exc_info())
+                    if args.reraise_exceptions:
+                        raise
+                    # Move to the next combination even if one fails
+                    continue
+
     return 0
 
 
