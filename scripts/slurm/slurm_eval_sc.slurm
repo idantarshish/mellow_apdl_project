@@ -27,7 +27,7 @@ echo "======================"
 
 cd $PROJECT_DIR
 
-$PYTHON train.py \
+$PYTHON evaluate_sc.py \
     --config config/eval_sc_1gpu.yaml \
     --checkpoint_path /home/yandex/APDL2526a/sapirtalmi/mellow_apdl_project/outputs/2026-04-01_12-23-01/model--epo-10.ckpt \
-    --save-dir /home/yandex/APDL2526a/idantarshish/mellow_apdl_project/outputs
+    --save-dir /home/yandex/APDL2526a/idantarshish/mellow_apdl_project/outputss

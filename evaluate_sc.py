@@ -32,7 +32,7 @@ def run_self_consistency_eval(trainer: Trainer, args):
     # Parameters for SC
     n_iterations = getattr(args, 'sc_n', 5)
     sc_temp = getattr(args, 'sc_temperature', 0.7)
-    sc_top_p = getattr(args, 'sc_top_p', 0.9)
+    sc_top_p = getattr(args, 'sc_top_p', 0.8)
 
     trainer.config["model"]["decoder"]["prefix_dim"] = trainer.config["model"]["encoder"]["d_proj"]
 
@@ -121,6 +121,11 @@ def main():
     N_LIST = [1, 3, 5]
     TEMP_LIST = [1.0, 0.7, 0.5]
     TOP_P_LIST = [0.8]
+    if args.sc_n:
+        N_LIST = [args.sc_n]
+    if args.sc_temperature:
+        TEMP_LIST = [args.sc_temperature]
+
 
     # Set up a base directory for the entire grid search
     base_job_id = f"SC_GRID_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
