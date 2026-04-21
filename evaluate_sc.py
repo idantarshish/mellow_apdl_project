@@ -16,14 +16,59 @@ from models.generate import generate_greedy_batch
 from metrics.get_metrics import Metric
 from utils.utils import LazyConversionDict
 
+import re
+from collections import Counter
+
+
+def normalize_answer(text):
+    """
+    Cleans and extracts the core answer (A/B/C/D or Yes/No) from redundant LLM text.
+    """
+    if not text:
+        return ""
+
+    # 1. Lowercase and strip whitespace/punctuation
+    text = text.lower().strip()
+    text = re.sub(r'[^\w\s]', '', text)
+
+    # 2. Check for MCQ options (A, B, C, D)
+    # We look for a standalone 'a', 'b', 'c', or 'd'
+    # Or common patterns like "option a" or "choice a"
+    mcq_match = re.search(r'\b([abcd])\)?\b', text, flags=re.IGNORECASE)
+    if mcq_match:
+        return mcq_match.group(1).upper() + ")"
+
+    # 3. Check for Yes/No
+    if 'yes' in text.split() or 'true' in text.split():
+        return "yes"
+    if 'no' in text.split() or 'false' in text.split():
+        return "no"
+
+    # 4. Fallback: return the cleaned string if no specific pattern is found
+    return text
+
 
 def majority_vote(candidates):
-    """Returns the most frequent string in a list of strings."""
+    """
+    Applies normalization to candidates and returns the most frequent canonical answer.
+    """
     if not candidates:
         return ""
-    # Strip whitespace and normalize to improve matching consistency
-    counts = Counter([c.strip() for c in candidates])
-    return counts.most_common(1)[0][0]
+
+    # Normalize all candidates
+    normalized = [normalize_answer(c) for c in candidates]
+
+    # Filter out empty strings if the model failed to generate
+    valid_answers = [a for a in normalized if a]
+
+    if not valid_answers:
+        return ""
+
+    # Count and get the most common
+    counts = Counter(valid_answers)
+    most_common_answer, freq = counts.most_common(1)[0]
+
+    return most_common_answer
 
 
 def run_self_consistency_eval(trainer: Trainer, args):
@@ -33,6 +78,10 @@ def run_self_consistency_eval(trainer: Trainer, args):
     n_iterations = getattr(args, 'sc_n', 5)
     sc_temp = getattr(args, 'sc_temperature', 0.7)
     sc_top_p = getattr(args, 'sc_top_p', 0.8)
+
+    trainer.logger.info(f"N={n_iterations}")
+    trainer.logger.info(f"TEMPERATURE={sc_temp}")
+    trainer.logger.info(f"TOP_P={sc_top_p}")
 
     trainer.config["model"]["decoder"]["prefix_dim"] = trainer.config["model"]["encoder"]["d_proj"]
 
