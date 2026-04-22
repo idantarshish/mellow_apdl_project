@@ -171,9 +171,9 @@ def main():
     TEMP_LIST = [1.0, 0.7, 0.5]
     TOP_P_LIST = [0.8]
     if args.sc_n:
-        N_LIST = [args.sc_n]
+        N_LIST = [int(args.sc_n)]
     if args.sc_temperature:
-        TEMP_LIST = [args.sc_temperature]
+        TEMP_LIST = [float(args.sc_temperature)]
 
 
     # Set up a base directory for the entire grid search
