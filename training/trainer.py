@@ -313,17 +313,42 @@ class Trainer:
         # creating dataset
         dataset, data_sampler, data_loader = self.get_data("datafiles")   
         start_epoch = 0
+        resume_checkpoint_data = None
 
         # Construct NN model
         model = self.get_model()
         model = model.to(self.device)
         if self.config["resume_checkpoint"] and self.config["resume_checkpoint"] != "":
-            checkpoint = torch.load(self.config["resume_checkpoint"], map_location=self.device)
-            checkpoint = checkpoint['state_dict']
-            model.load_state_dict(checkpoint, strict=False)
+            # Rank 0 copies checkpoint to /dev/shm (RAM disk) so all ranks load from fast
+            # local storage. Previously all ranks loaded from NFS simultaneously (4×1.7 GB
+            # competing reads), which caused NCCL watchdog timeout on slow NFS days.
+            # broadcast_optimizer_state requires all ranks to have optimizer state loaded
+            # (same tensor count); so all ranks load the checkpoint, but only rank 0 applies
+            # model weights (DDP broadcast_parameters below syncs them to other ranks).
+            import shutil as _shutil
+            nfs_ckpt = self.config["resume_checkpoint"]
+            local_ckpt = "/dev/shm/mellow_resume.ckpt"
+            if self.distributed.rank() == 0:
+                _shutil.copy2(nfs_ckpt, local_ckpt)
+                self.logger.info("Checkpoint copied to %s", local_ckpt)
+            self.distributed.barrier()
+            resume_checkpoint_data = torch.load(local_ckpt, map_location=self.device)
+            if self.distributed.rank() == 0:
+                model.load_state_dict(resume_checkpoint_data['state_dict'], strict=False)
+                # Projection LayerNorm gamma grew to ~6x during epochs 1-3 (should be ~1.0).
+                # Large gamma → prefix embeddings of magnitude ~6 → NaN in SmolLM2 backward.
+                # Reset to 1.0; the lower LR (5e-5) will prevent rapid regrowth.
+                with torch.no_grad():
+                    model.audio_encoder.projection.layer_norm.weight.fill_(1.0)
+                    model.audio_encoder.projection.layer_norm.bias.fill_(0.0)
+                self.logger.warning("Reset projection.layer_norm gamma to 1.0 (was ~6.2)")
+            if 'epoch' in resume_checkpoint_data:
+                start_epoch = resume_checkpoint_data['epoch'] + 1
 
         model = self.distributed.create_distributed_model(model)
         model.train()
+        if self.config["model"]["encoder"]["freeze_audio_encoder_weights"]:
+            model.module.audio_encoder.base.eval()
 
         if self.distributed.rank() == 0:
             self.logger.info("Mellow has %d parameters of which %d are trainable" % numparams(model))
@@ -355,7 +380,16 @@ class Trainer:
             if lr_schedule == "step":
                 lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [50, 100, 150], gamma=0.5)
             elif lr_schedule == "cosine":
-                lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, self.config["train"]["num_epochs"])
+                warm_up_steps = self.config["train"]["optimizer"].get("warm_up_steps", 0)
+                if warm_up_steps > 0:
+                    def lr_lambda(step):
+                        if step < warm_up_steps:
+                            return float(step) / float(max(1, warm_up_steps))
+                        progress = float(step - warm_up_steps) / float(max(1, num_batches_per_epoch * self.config["train"]["num_epochs"] - warm_up_steps))
+                        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+                    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+                else:
+                    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, self.config["train"]["num_epochs"])
             elif lr_schedule == "cosine_restarts":
                 lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=15)
             elif lr_schedule == "loss_tracking":
@@ -364,8 +398,32 @@ class Trainer:
             else:
                 raise ValueError(f"No such lr schedule: {lr_schedule}")
 
-        # broadcast optimizer state to all other processes
+        if resume_checkpoint_data is not None:
+            if 'optimizer' in resume_checkpoint_data:
+                try:
+                    optimizer.load_state_dict(resume_checkpoint_data['optimizer'])
+                except ValueError as e:
+                    self.logger.warning(f"Could not load optimizer state (parameter groups changed, e.g. layers frozen/unfrozen): {e}. Starting optimizer from scratch.")
+            if lr_scheduler is not None and 'lr_scheduler' in resume_checkpoint_data:
+                lr_scheduler.load_state_dict(resume_checkpoint_data['lr_scheduler'])
+
+        # broadcast optimizer state (Adam m/v tensors) to all other processes
         self.distributed.broadcast_optimizer_state(optimizer)
+        # broadcast_optimizer_state only syncs Adam tensors, not param_groups (LR)
+        # or lr_scheduler internal state. Sync those explicitly from rank 0.
+        if self.config["resume_checkpoint"] and self.config["resume_checkpoint"] != "":
+            lr_tensor = torch.tensor(optimizer.param_groups[0]['lr'], device=self.device)
+            self.distributed.broadcast(lr_tensor)
+            for pg in optimizer.param_groups:
+                pg['lr'] = lr_tensor.item()
+            if lr_scheduler is not None:
+                sched_t = torch.tensor(
+                    [lr_scheduler.last_epoch, lr_scheduler._step_count],
+                    dtype=torch.long, device=self.device
+                )
+                self.distributed.broadcast(sched_t)
+                lr_scheduler.last_epoch = int(sched_t[0].item())
+                lr_scheduler._step_count = int(sched_t[1].item())
         # Train the model
         num_batches_per_epoch = len(data_loader)
 
@@ -373,7 +431,7 @@ class Trainer:
         lowest_accerr_epo = 1000.0
         max_grad_norm = self.config["train"]["max_grad_norm"]
         grad_norm_tracker = GradNormTracker(initial_l2_norm=max_grad_norm, initial_max_norm=10 * max_grad_norm)
-    
+
         loss_history = dict(
             loss=[],
             total_grad_norm=[],
@@ -382,16 +440,18 @@ class Trainer:
 
         os.makedirs(self.config["save_dir"], exist_ok=True)
 
-        total_step = 0
-        ignore_index = dataset.tokenizer.encode(dataset.tokenizer.pad_token)[0]
+        total_step = resume_checkpoint_data.get('total_step', 0) if resume_checkpoint_data is not None else 0
+        ignore_index = dataset.tokenizer.pad_token_id
         for epoch in range(start_epoch, self.config["train"]["num_epochs"]):
             # set epoch to use different seeds for different epochs during sampling
             data_sampler.set_epoch(epoch)
             tqdm_handler = tqdm(total=num_batches_per_epoch, position=0)
             metrics_train = {"epoch": epoch}
             accerr_epo = 0  # accumulated error per epoch
+            skipped_steps_epo = 0  # steps skipped due to NaN/Inf gradients
 
-            if epoch > 0 and lr_scheduler is not None:
+            is_step_lr_scheduler = isinstance(lr_scheduler, torch.optim.lr_scheduler.LambdaLR)
+            if epoch > 0 and lr_scheduler is not None and not is_step_lr_scheduler:
                 lr_scheduler.step()
                 lr = lr_scheduler.get_last_lr()[0]
             elif lr_scheduler is None:
@@ -414,23 +474,69 @@ class Trainer:
                     "answer":batch_answer,
                 }
                 input_dict = LazyConversionDict(input_dict, lambda x: x.to(self.device))
-                
-                model_outputs = model(input_dict)
-                logits = model_outputs.logits[:, self.config["model"]["decoder"]["total_prefix_length"] - 1: -1]
-                loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), input_dict['answer']['input_ids'].flatten(), ignore_index=ignore_index)
+
+                # Skip batches with corrupted audio before the forward pass.
+                # NaN/Inf waveforms cause NaN activations inside the frozen HTSAT encoder.
+                # Extreme-magnitude waveforms (finite but very large) can cause logit overflow
+                # and NaN gradients in backward even when the forward loss is finite.
+                MAX_AUDIO_ABS = 1.5
+                audio_ok = torch.tensor(
+                    1.0 if (torch.isfinite(input_dict['audio1']).all() and
+                            torch.isfinite(input_dict['audio2']).all() and
+                            input_dict['audio1'].abs().max() < MAX_AUDIO_ABS and
+                            input_dict['audio2'].abs().max() < MAX_AUDIO_ABS) else 0.0,
+                    device=self.device
+                )
+                self.distributed.all_reduce(audio_ok, average=False)  # sum; < world_size means some rank has bad audio
+                if audio_ok.item() < self.distributed.world_size() - 0.5:
+                    self.logger.warning("NaN/Inf or extreme-magnitude audio detected, skipping batch")
+                    continue
+
+                with torch.autocast(device_type=self.device_type, dtype=self.fast_dtype, enabled=self.use_mixed_precision):
+                    model_outputs = model(input_dict)
+                    logits = model_outputs.logits[:, self.config["model"]["decoder"]["total_prefix_length"] - 1: -1]
+                    loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), input_dict['answer']['input_ids'].flatten(), ignore_index=ignore_index)
 
                 optimizer.zero_grad()
 
+                # Always call backward so DDP gradient sync runs on all ranks.
+                # Skipping backward on some ranks but not others deadlocks NCCL AllReduce.
                 grad_scaler.scale(loss).backward()
-                grad_scaler.unscale_(optimizer)  # to use the same max_grad_norm value for gradient clipping
+                grad_scaler.unscale_(optimizer)
 
-                total_norm, grad_scale = grad_norm_tracker.track_and_clip_(list(model.named_parameters()))
-                
-                grad_scaler.step(optimizer)
-                grad_scaler.update()
+                # If loss is NaN/Inf on any rank: skip the step (bad data or catastrophic state).
+                # If loss is finite but some gradients are NaN (projection overflow into
+                # SmolLM2 backward): zero out NaN grads and proceed — partial updates beat
+                # skipping 100% of steps (old logic had 99% skip rate).
+                loss_bad = torch.tensor(0.0 if torch.isfinite(loss) else 1.0, device=self.device)
+                self.distributed.all_reduce(loss_bad, average=False)
+                if loss_bad.item() > 0.5:
+                    skipped_steps_epo += 1
+                    if self.distributed.rank() == 0:
+                        self.logger.warning("NaN/Inf loss detected, skipping optimizer step")
+                    optimizer.zero_grad()
+                    total_norm, grad_scale = 0.0, 1.0
+                else:
+                    # Zero out any NaN/Inf gradients before clipping and stepping
+                    first_nan_name = None
+                    for name, p in model.named_parameters():
+                        if p.grad is not None and not torch.isfinite(p.grad).all():
+                            p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
+                            if first_nan_name is None:
+                                first_nan_name = name
+                    if first_nan_name is not None and self.distributed.rank() == 0:
+                        self.logger.warning("NaN/Inf gradient zeroed in: %s (proceeding with update)", first_nan_name)
+
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                    total_norm, grad_scale = grad_norm_tracker.track_and_clip_(list(model.named_parameters()))
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                    if is_step_lr_scheduler:
+                        lr_scheduler.step()
 
                 loss = self.distributed.all_reduce(loss.detach()).item()
-                accerr_epo += loss
+                if torch.isfinite(torch.tensor(loss)):
+                    accerr_epo += loss
 
                 if loss_tracker is not None:
                     loss_tracker.track_loss(loss)
@@ -450,10 +556,11 @@ class Trainer:
                     errstr = ", ".join(
                         "{}: {:6.3f}(e-6)".format(k, v * 1e6) for k, v in errdict.items()
                     )
+                    skip_rate = skipped_steps_epo / (ii + 1)
                     self.logger.info(
-                        "Epoch [%3d/%3d], Step [%3d/%3d], %s",
+                        "Epoch [%3d/%3d], Step [%3d/%3d], %s, skip_rate: %.1f%%",
                         epoch + 1, self.config["train"]["num_epochs"], ii + 1,
-                        num_batches_per_epoch, errstr
+                        num_batches_per_epoch, errstr, skip_rate * 100
                     )
                     tqdm_handler.update(1)
 
@@ -482,7 +589,7 @@ class Trainer:
                     self.logger.info("Saving model to: %s Total training time: %f hours",
                                         model_fpath, (time.time() - t0) / 3600.0)
 
-                    self._save_model_state(model_fpath, model)
+                    self._save_model_state(model_fpath, model, epoch=epoch, optimizer=optimizer, lr_scheduler=lr_scheduler, total_step=total_step)
                     
             # distributed: broadcast parameters to ensure that models do not diverge
             self.distributed.broadcast_parameters(model.state_dict())
@@ -503,7 +610,7 @@ class Trainer:
         model = self.get_model()
         model = model.to(self.device)
         checkpoint = torch.load(self.config["checkpoint_path"], map_location=self.device)
-        model.load_state_dict(checkpoint, strict=True)
+        model.load_state_dict(checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint, strict=True)
         model.eval()
 
         tasks = self.config["data"]["datafiles"]
@@ -517,6 +624,7 @@ class Trainer:
             num_batches_per_epoch = len(data_loader)
             tqdm_handler = tqdm(total=num_batches_per_epoch, position=0)
 
+            debug_samples = self.config.get("debug_samples", None)
             generations, answers, filepaths, inputs = [], [], [], []
             with torch.no_grad():
                 for batch_data_dict in tqdm(data_loader):
@@ -535,21 +643,34 @@ class Trainer:
                         "answer":batch_answer,
                     }
                     input_dict = LazyConversionDict(input_dict, lambda x: x.to(self.device))
-                
+
                     prefix, _, _ = model.generate_prefix_inference(input_dict)
                     generated_text = generate_greedy_batch(model, data_loader.dataset.tokenizer, embed=prefix)
                     generations += generated_text
+                    print(f"generated_text {generated_text}")
                     answers += batch_answer_text
                     inputs += batch_input_text
                     filepaths += batch_file_paths
-                    #break
+                    if debug_samples is not None and len(generations) >= debug_samples:
+                        break
+
+            if self.distributed.rank() == 0:
+                taskname = task.split(os.path.sep)[-1].split(".json")[0]
+                samples_dir = os.path.join(self.config["save_dir"], f"{taskname}_outputs")
+                os.makedirs(samples_dir, exist_ok=True)
+                for i, (fp, inp, gen, ans) in enumerate(zip(filepaths, inputs, generations, answers)):
+                    sample_name = os.path.splitext(os.path.basename(fp))[0]
+                    sample_path = os.path.join(samples_dir, f"{i:04d}_{sample_name}.json")
+                    with open(sample_path, "w") as f:
+                        json.dump({"filepath": fp, "input": inp, "generated": gen, "answer": ans}, f, indent=2)
+                self.logger.info("Saved %d sample outputs to %s", len(generations), samples_dir)
 
             metric.get_metrics(generations, answers, filepaths)
             if self.distributed.rank() == 0:
                 self.logger.info("Task %s results", task)
                 for key in metric.metrics.keys():
                     self.logger.info("%s: %f", key, metric.metrics[key]["score"])
-            
+
             # azure logging
             val_score += metric.metrics["main"]["score"]
             taskname = task.split(os.path.sep)[-1].split(".json")[0]
@@ -576,7 +697,7 @@ class Trainer:
         for e in range(1, max_epochs+1):
             checkpoint_path = self.config["checkpoint_path"].replace("-epo-1",f"-epo-{e}")
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            model.load_state_dict(checkpoint, strict=True)
+            model.load_state_dict(checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint, strict=True)
             model.eval()
 
             val_score = 0
@@ -636,9 +757,20 @@ class Trainer:
         return f"{prefix}-epo-{epoch + 1}.ckpt"
 
     @retry
-    def _save_model_state(self, model_fpath, model):
+    def _save_model_state(self, model_fpath, model, epoch=None, optimizer=None, lr_scheduler=None, total_step=None):
+        state = {
+            'state_dict': self.distributed.get_distributed_model_state(model),
+        }
+        if epoch is not None:
+            state['epoch'] = epoch
+        if optimizer is not None:
+            state['optimizer'] = optimizer.state_dict()
+        if lr_scheduler is not None:
+            state['lr_scheduler'] = lr_scheduler.state_dict()
+        if total_step is not None:
+            state['total_step'] = total_step
         with open(model_fpath, "wb") as f:
-            torch.save(self.distributed.get_distributed_model_state(model), f)
+            torch.save(state, f)
             # make sure data is sent to blobstorage
             f.flush()
             f.close()

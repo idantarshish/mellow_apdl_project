@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH -vv
 #SBATCH --job-name=mellow_torchrun
-#SBATCH -N 2                         # Number of nodes
-#SBATCH --gpus=v100-32:16             # Request 16 V100-32GB GPUs total (4 per node)
-#SBATCH -t 48:00:00
+#SBATCH -N 1                         # Number of nodes
+#SBATCH --gpus=4                      # Request 4 GPUs
+#SBATCH -t 24:00:00
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
-#SBATCH -p GPU                # GPU-shared partition
+#SBATCH -p studentkillable
 #SBATCH --export=ALL
 #SBATCH --signal INT@60
 
@@ -30,17 +30,19 @@ fi
 
 echo "GPUS_PER_NODE: $GPUS_PER_NODE"
 
-# Activate conda environment
-# Update 'qa_gen_3.1' to your conda environment name
-source $(conda info --base)/etc/profile.d/conda.sh
-conda activate qa_gen_3.1
+# Activate virtual environment
+source /home/yandex/APDL2526a/sapirtalmi/mellow_env/bin/activate
 
 # Verify environment
 echo "Python: $(which python)"
-echo "Conda env: $CONDA_DEFAULT_ENV"
+echo "Virtual env: $VIRTUAL_ENV"
 
 # Using torchrun (recommended for PyTorch >= 1.10)
 # This automatically sets up all distributed environment variables
+export HF_HOME=/home/yandex/APDL2526a/sapirtalmi/hf_cache
+export TRANSFORMERS_CACHE=/home/yandex/APDL2526a/sapirtalmi/hf_cache
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+
 srun bash -c "
     python -m torch.distributed.run \
     --nnodes=$SLURM_NNODES \

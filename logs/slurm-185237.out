@@ -1,0 +1,7 @@
+=== SLURM Job Info ===
+Job ID: 185237
+Node: s-006
+GPUs: 0,1,2,3
+Master: s-006:29500
+Python: Python 3.10.19
+======================

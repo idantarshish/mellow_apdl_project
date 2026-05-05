@@ -138,8 +138,9 @@ class DecoderModel(nn.Module):
         
         audio_projections1 = downsample(daudio1).contiguous()
         audio_projections2 = downsample(daudio2).contiguous()
-        
+
         prefix = torch.cat((audio_projections1, sep_embed, audio_projections2, sep_embed, dtext), dim=1)
+        prefix = torch.nan_to_num(prefix, nan=0.0, posinf=0.0, neginf=0.0)
         embedding_cat = torch.cat((prefix, embedding_text), dim=1)
         if labels is not None:
             dummy_token = self.get_dummy_token(tokens['input_ids'].shape[0], tokens['input_ids'].device)

@@ -1,0 +1,11 @@
+=== SLURM Job Info ===
+Job ID: 184723
+Node: s-006
+GPUs: 0,1,2,3
+World size: 
+Master: s-006:29500
+Python: Python 3.10.19
+======================
+Using config from config/train_cluster.yaml
+Switching to multiprocessing strategy forkserver
+init_method for torch.distributed.init_process_group: tcp://s-006:29500

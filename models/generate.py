@@ -106,7 +106,8 @@ def generate_greedy(
 
                 indices_to_remove = sorted_indices[sorted_indices_to_remove]
                 logits[:, indices_to_remove] = filter_value
-                next_token = torch.argmax(logits, -1).unsqueeze(0)
+                probs = F.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
                 next_token_embed = model.caption_decoder.lm.transformer.wte(next_token)
                 if tokens is None:
                     tokens = next_token
@@ -134,12 +135,27 @@ def generate_greedy_batch(
         top_p=0.8,
         temperature=1.,
         stop_token: str = '<|endoftext|>',
+        block_option_tokens: bool = False,
+        strip_option_prefix: bool = False,
 ):
     model.eval()
     generated_num = 0
     stop_token_index = tokenizer.encode(stop_token)[0]
     filter_value = -float("Inf")
     device = next(model.parameters()).device
+
+    # Pre-compute option token IDs once (tokens whose decoded text is a single
+    # MC-option letter: "a", "b", "c", or variants like " a", " b", " c").
+    # These are masked on the very first generation step when block_option_tokens=True.
+    option_token_ids = None
+    if block_option_tokens:
+        option_letters = {'a', 'b', 'c', 'A', 'B', 'C'}
+        option_token_ids = []
+        for tid in range(tokenizer.vocab_size):
+            decoded = tokenizer.decode([tid])
+            if decoded.strip() in option_letters:
+                option_token_ids.append(tid)
+        option_token_ids = torch.tensor(option_token_ids, device=device)
 
     with torch.no_grad():
         if embed is not None:
@@ -148,7 +164,7 @@ def generate_greedy_batch(
             if tokens is None:
                 tokens = torch.tensor(tokenizer.encode(prompt))
                 tokens = tokens.unsqueeze(0).to(device)
-            
+
             if "gpt2" in model.caption_decoder.text_decoder:
                generated = model.caption_decoder.lm.transformer.wte(tokens)
             elif "smollm2" in model.caption_decoder.text_decoder:
@@ -160,6 +176,9 @@ def generate_greedy_batch(
             outputs = model.caption_decoder.lm(inputs_embeds=generated)
             logits = outputs.logits
             logits = logits[:, -1, :] / (temperature if temperature > 0 else 1.0)
+            # Block MC-option letters on the first generated token only
+            if i == 0 and option_token_ids is not None and len(option_token_ids) > 0:
+                logits[:, option_token_ids] = filter_value
             sorted_logits, sorted_indices = torch.sort(logits, descending=True)
             cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
             sorted_indices_to_remove = cumulative_probs > top_p
@@ -174,7 +193,8 @@ def generate_greedy_batch(
                 indices_to_remove = sorted_indices[k][sorted_indices_to_remove[k]]
                 logits[k, indices_to_remove] = filter_value
 
-            next_token = torch.argmax(logits, -1).unsqueeze(1)
+            probs = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
 
             if "gpt2" in model.caption_decoder.text_decoder:
                next_token_embed = model.caption_decoder.lm.transformer.wte(next_token)
@@ -197,5 +217,11 @@ def generate_greedy_batch(
 
         output_list = list(tokens.squeeze().cpu().numpy())
         generated_list = [tokenizer.decode(x).split("<|endoftext|>")[0] for x in output_list]
+
+    if strip_option_prefix:
+        import re
+        # Strip leading "a) " / "b) " / "c) " (case-insensitive, with optional space)
+        _prefix_re = re.compile(r'^\s*[a-cA-C]\)\s*', re.IGNORECASE)
+        generated_list = [_prefix_re.sub('', g) for g in generated_list]
 
     return generated_list

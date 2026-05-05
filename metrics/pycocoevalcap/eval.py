@@ -47,10 +47,10 @@ class COCOEvalCap:
             print('setting up scorers...')
         scorers = [
             (Bleu(4), ["Bleu_1", "Bleu_2", "Bleu_3", "Bleu_4"]),
-            (Meteor(), "METEOR"),
+            # (Meteor(), "METEOR"),  # requires Java
             (Rouge(), "ROUGE_L"),
             (Cider(), "CIDEr"),
-            (Spice(), "SPICE")
+            # (Spice(), "SPICE")  # requires Java
         ]
 
         # =================================================
@@ -72,18 +72,7 @@ class COCOEvalCap:
                 if verbose:
                     print("%s: %0.3f"%(method, score))
 
-        # Compute SPIDEr metric (average of CIDEr and SPICE)
-        if verbose:
-            print('computing %s score...' % ('SPIDEr'))
-        score = (self.eval['CIDEr'] + self.eval['SPICE']) / 2.
-        scores = list((
-                np.array([audio['CIDEr'] for audio in self.audioToEval.values()]) +
-                np.array([audio['SPICE']['All']['f'] for audio in self.audioToEval.values()])
-        ) / 2)
-        self.setEval(score, 'SPIDEr')
-        self.setAudioToEvalAudios(scores, gts.keys(), 'SPIDEr')
-        if verbose:
-            print("%s: %0.3f" % ('SPIDEr', score))
+        # SPIDEr (CIDEr + SPICE) / 2 disabled — SPICE requires Java
 
         self.setEvalAudios()
 

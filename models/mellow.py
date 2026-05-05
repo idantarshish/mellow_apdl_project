@@ -90,17 +90,24 @@ class AudioEncoder(nn.Module):
         self.projection = Projection(pretrained_emb_size if use_pretrained_audioencoder else d_in, d_out)
 
         if freeze_audio_encoder_weights:
-            if audioenc_name == 'HTSAT':
-                for p in self.base.htsat.parameters():
-                    p.requires_grad = False
-            elif audioenc_name == 'Cnn14':
-                for p in self.base.cnn14.parameters():
-                    p.requires_grad = False
+            # Freeze all of self.base (backbone + c2l projection) so that c2l
+            # weight gradients cannot overflow and corrupt training.
+            # The downstream self.projection layer remains trainable.
+            for p in self.base.parameters():
+                p.requires_grad = False
 
     def forward(self, x):
         out_dict = self.base(x)
         audio_features, audio_classification_output = out_dict['embedding'], out_dict['clipwise_output']
+        audio_features = torch.nan_to_num(audio_features, nan=0.0, posinf=0.0, neginf=0.0)
         projected_vec = self.projection(audio_features)
+        # Clamp projection output to prevent large-magnitude embeddings from
+        # overflowing SmolLM2's attention logits during backward pass.
+        proj_max = projected_vec.abs().max().item()
+        if proj_max > 2.0:
+            import logging
+            logging.getLogger(__name__).warning(f"Projection output max abs = {proj_max:.2f}, clamping to [-2, 2]")
+        projected_vec = torch.clamp(projected_vec, -2.0, 2.0)
         return projected_vec, audio_classification_output, out_dict
 
 class Mellow(nn.Module):

@@ -132,6 +132,9 @@ def add_cmdline_args(parser: argparse.ArgumentParser):
     parser.add_argument("--ns-only", action="store_true", help="whether FPIE model is NS only")
     parser.add_argument("--reraise-exceptions", action="store_true",
                         help="re-raise exceptions to let debugger stop at raise statement")
+
+    parser.add_argument('--sc_n')
+    parser.add_argument('--sc_temperature')
     
 def add_config_args(parser: argparse.ArgumentParser, config: Dict[str, Any],
                     prefix: str, explicit_args: Optional[Set[str]] = None):

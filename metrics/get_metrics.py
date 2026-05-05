@@ -45,11 +45,11 @@ class Metric:
             # print(captions_pred)
             # print(captions_gt)
             metrics = capmetrics.evaluate_metrics(captions_pred, captions_gt, nb_reference_captions=5)
-            metrics["main"] = metrics["spider"]
+            metrics["main"] = metrics.get("spider", metrics.get("cider", {"score": 0.0}))
             self.metrics = metrics
         else:
             from metrics import capmetrics
             captions_pred, captions_gt = capmetrics.parse_output_for_diffmetrics(generations, answers)
             metrics = capmetrics.evaluate_metrics(captions_pred, captions_gt, nb_reference_captions=1)
-            metrics["main"] = metrics["spider"]
+            metrics["main"] = metrics.get("spider", metrics.get("cider", {"score": 0.0}))
             self.metrics = metrics

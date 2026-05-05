@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import timedelta
 from typing import Dict, List
 
 import torch.distributed
@@ -113,7 +114,7 @@ class TorchDistributedContext(IDistributedContext):
         # Initialize master address if needed
         self._get_init_method_itp()
         
-        torch.distributed.init_process_group(self._backend)
+        torch.distributed.init_process_group(self._backend, timeout=timedelta(hours=2))
         
         # Only log from rank 0 to avoid duplicate messages
         if self.rank() == 0:
@@ -155,7 +156,7 @@ class TorchDistributedContext(IDistributedContext):
         # Set find_unused_parameters=False for better performance
         # Only set to True if your model has control flow that leads to unused parameters
         model = nn.parallel.DistributedDataParallel(
-            model, 
+            model,
             find_unused_parameters=False
         )
         self.broadcast_parameters(model.state_dict())

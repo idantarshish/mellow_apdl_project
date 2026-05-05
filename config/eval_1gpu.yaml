@@ -2,17 +2,15 @@
 mode: 'evaluate_checkpoint'
 gpu: True
 resume_checkpoint: ""
+debug_samples: null
+checkpoint_path: '/home/yandex/APDL2526a/sapirtalmi/mellow_apdl_project/outputs/2026-03-31_10-38-33/model--epo-7.ckpt'
 
 data:
-    datapath: '/ocean/projects/cis220031p/sdixit1'
+    datapath: '/home/yandex/APDL2526a/idantarshish/mellow_apdl_project/data'
     datafiles:
-        # - 'datafiles\\dummy_train.json'
-        # - 'datafiles\\adiff.json'
-        - 'datafiles/mmau-test-mini_proc2.json'
-        - 'datafiles/mmau-test-mini_proc2.json'
+        - '/home/yandex/APDL2526a/sapirtalmi/mellow_apdl_project/datafiles/val_clotho.json'
     sampling_rate: 32000
     segment_seconds: 10
-    # tokenizer_type: "gpt2"
     tokenizer_type: "HuggingFaceTB/SmolLM2-135M"
     op_text_len: 250
     ip_text_len: 129
@@ -25,7 +23,7 @@ model:
         d_proj: 576
         use_pretrained_audioencoder: True
         freeze_audio_encoder_weights: True
-        pretrained_audioencoder_path: '/ocean/projects/cis220031p/sdixit1/Mellow/Mellow'
+        pretrained_audioencoder_path: '/home/yandex/APDL2526a/sapirtalmi/mellow_apdl_project/htsat'
     decoder:
       text_decoder: "HuggingFaceTB/SmolLM2-135M"
     #   text_decoder: "gpt2"

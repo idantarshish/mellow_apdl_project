@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# 
+#
 # File Name : ptbtokenizer.py
 #
 # Description : Do the PTB Tokenization and remove punctuations.
@@ -12,64 +12,31 @@
 # This code was pulled from https://github.com/tylin/coco-caption
 # and refactored to Python 3.
 # Image-specific names and comments have been changed to be audio-specific
+# Java dependency removed: tokenization is now done in pure Python.
 # =================================================================
 
-import os
-import sys
-import subprocess
-import tempfile
-import itertools
-
-# path to the stanford corenlp jar
-STANFORD_CORENLP_3_4_1_JAR = 'stanford-corenlp-3.4.1.jar'
+import re
 
 # punctuations to be removed from the sentences
-PUNCTUATIONS = ["''", "'", "``", "`", "-LRB-", "-RRB-", "-LCB-", "-RCB-", \
-        ".", "?", "!", ",", ":", "-", "--", "...", ";"] 
+PUNCTUATIONS = {"''", "'", "``", "`", "-LRB-", "-RRB-", "-LCB-", "-RCB-",
+                ".", "?", "!", ",", ":", "-", "--", "...", ";"}
+
+def _python_tokenize(sentence):
+    """Lowercase and remove punctuation tokens, mimicking PTB tokenizer output."""
+    sentence = sentence.lower()
+    sentence = re.sub(r"([.?!,;:\-])", r" \1 ", sentence)
+    tokens = sentence.split()
+    tokens = [w for w in tokens if w not in PUNCTUATIONS]
+    return ' '.join(tokens)
 
 class PTBTokenizer:
-    """Python wrapper of Stanford PTBTokenizer"""
+    """Pure-Python replacement for the Stanford PTBTokenizer (no Java required)."""
 
     def tokenize(self, captions_for_audio):
-        cmd = ['java', '-cp', STANFORD_CORENLP_3_4_1_JAR, \
-                'edu.stanford.nlp.process.PTBTokenizer', \
-                '-preserveLines', '-lowerCase']
-
-        # ======================================================
-        # prepare data for PTB Tokenizer
-        # ======================================================
         final_tokenized_captions_for_audio = {}
-        audio_id = [k for k, v in captions_for_audio.items() for _ in range(len(v))]
-        sentences = '\n'.join([c['caption'].replace('\n', ' ') for k, v in captions_for_audio.items() for c in v])
-
-        # ======================================================
-        # save sentences to temporary file
-        # ======================================================
-        path_to_jar_dirname=os.path.dirname(os.path.abspath(__file__))
-        tmp_file = tempfile.NamedTemporaryFile(delete=False, dir=path_to_jar_dirname)
-        tmp_file.write(sentences.encode())
-        tmp_file.close()
-
-        # ======================================================
-        # tokenize sentence
-        # ======================================================
-        cmd.append(os.path.basename(tmp_file.name))
-        p_tokenizer = subprocess.Popen(cmd, cwd=path_to_jar_dirname, \
-                stdout=subprocess.PIPE)
-        token_lines = p_tokenizer.communicate(input=sentences.rstrip())[0]
-        token_lines = token_lines.decode()
-        lines = token_lines.split('\n')
-        # remove temp file
-        os.remove(tmp_file.name)
-
-        # ======================================================
-        # create dictionary for tokenized captions
-        # ======================================================
-        for k, line in zip(audio_id, lines):
-            if not k in final_tokenized_captions_for_audio:
-                final_tokenized_captions_for_audio[k] = []
-            tokenized_caption = ' '.join([w for w in line.rstrip().split(' ') \
-                    if w not in PUNCTUATIONS])
-            final_tokenized_captions_for_audio[k].append(tokenized_caption)
-
+        for k, captions in captions_for_audio.items():
+            final_tokenized_captions_for_audio[k] = []
+            for c in captions:
+                tokenized = _python_tokenize(c['caption'].replace('\n', ' '))
+                final_tokenized_captions_for_audio[k].append(tokenized)
         return final_tokenized_captions_for_audio

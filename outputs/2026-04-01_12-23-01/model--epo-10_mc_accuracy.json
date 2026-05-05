@@ -1,0 +1,26 @@
+{
+  "checkpoint": "/home/yandex/APDL2526a/sapirtalmi/mellow_apdl_project/outputs/2026-04-01_12-23-01/model--epo-10.ckpt",
+  "results": {
+    "CLE.json": {
+      "accuracy": 0.212,
+      "correct": 106,
+      "total": 500,
+      "errors": 0,
+      "random_baseline": 0.25
+    },
+    "Clotho-MCQ.json": {
+      "accuracy": 0.28,
+      "correct": 140,
+      "total": 500,
+      "errors": 0,
+      "random_baseline": 0.25
+    },
+    "ClothoAQA.json": {
+      "accuracy": 0.046,
+      "correct": 23,
+      "total": 500,
+      "errors": 0,
+      "random_baseline": 0.5
+    }
+  }
+}
