@@ -1,6 +1,27 @@
-\documentclass[conference]{IEEEtran}
-\IEEEoverridecommandlockouts
+\documentclass[cameraready]{Interspeech}
 
+% Title
+\title{Replicating Mellow Under Real World Constraints}
+
+% Authors
+\author[affiliation={1}]{Gal}{Aharoni}
+\author[affiliation={1}]{Ori}{Baron}
+\author[affiliation={1}]{Sapir}{Talmi}
+\author[affiliation={1}]{Idan}{Tarshish}
+
+% Affiliations
+\address{
+    \textbf{IDs:} 203521984, 215889510, 318900875, 314634981 \\[1.5ex]
+    $^1$ School of Computer Science, Tel Aviv University, Israel
+}
+
+% Emails
+\email{\{galaharoni,oribaron,sapirtalmi,idantarshish\}@mail.tau.ac.il}
+
+% Keywords
+\keywords{audio language model, small audio-language model, audio reasoning, Clotho, self-consistency decoding}
+
+\usepackage{comment}
 \usepackage{cite}
 \usepackage{amsmath,amssymb,amsfonts}
 \usepackage{graphicx}
@@ -9,182 +30,82 @@
 \usepackage{booktabs}
 \usepackage{hyperref}
 \usepackage{microtype}
+\usepackage{multirow}
+\usepackage{threeparttable}
+
+%==================================================================================
+% Content
 
 \begin{document}
-
-\title{Adapting Mellow to Clotho: Audio Comparison Question-Answering\\
-via Pairwise Training on Environmental Sound Recordings}
-
-\author{
-    \IEEEauthorblockN{Sapir Talmi \quad [Name 2] \quad [Name 3] \quad [Name 4]}
-    \IEEEauthorblockA{
-        School of Computer Science, Tel Aviv University, Tel Aviv, Israel\\
-        % TODO: add all student IDs
-    }
-}
-
 \maketitle
 
-% =============================================================================
+
 \begin{abstract}
-We adapt Mellow~\cite{mellow}, a small audio language model (167M parameters) designed for
-audio reasoning, to the Clotho V2.1 benchmark~\cite{drossos2020clotho}. Mellow's architecture
-takes two audio recordings and a text question as input and generates a natural language
-answer — a design suited to comparative audio reasoning. Since we could not reproduce
-training on the full ReasonAQA dataset (which requires both AudioCaps and Clotho), we restrict
-training to Clotho only and reformulate the task as pairwise audio comparison: given two
-environmental sound recordings, generate a text description of their differences. We use the Clotho portion of the ReasonAQA data files, covering six task subtypes
-(MCQ, detail captioning, audio difference, entailment, and QA), totalling 292,768 training
-examples and $\sim$80,000 validation examples. We document the complete engineering process, including distributed training
-failures (NCCL deadlocks, checkpoint I/O contention) and gradient instability bugs (NaN from
-corrupted audio, LayerNorm drift, unfrozen adjacent layers), and report the fixes required to
-achieve stable training across 10 epochs on 4 GPUs.  We evaluate the trained model on the Clotho validation set using BLEU-1, BLEU-4, CIDEr,
-and ROUGE-L metrics, and report multiple-choice accuracy on three closed-ended tasks following
-the original Mellow evaluation protocol. We discuss the gap between our Clotho-only results
-and the original paper, and identify MC-format contamination and weak cross-modal grounding
-as the primary failure modes.
+    Reasoning over audio within low-resource settings remains an open challenge, as the most capable Audio-Language Models (ALMs) typically exceed several billion parameters, making them impractical for on-device or resource-constrained applications. Mellow~\cite{mellow} is a recent 167M-parameter ALM designed for reasoning, which takes up to two audio recordings together with a text prompt as input and generates a natural-language response, achieving performance on reasoning benchmarks competitive with models 50$\times$ its size. To achieve this, the authors introduced ReasonAQA, a 1.24M-example dataset of question-answer pairs whose audio files are sourced from AudioCaps and Clotho. In this work, we reimplement Mellow and train it on the Clotho portion of ReasonAQA only (292,768 training examples), since AudioCaps was not accessible to us. We detail the training process, the challenges encountered, and the modifications made to achieve stable training. We evaluate the trained model on the Clotho validation set using standard captioning metrics and multiple-choice accuracy. Additionally, we evaluate Self-Consistency decoding across sampling temperatures and path counts on both our model and the original Mellow weights. Self-Consistency substantially improves our model on closed-ended tasks (+19.7\% absolute accuracy at $N{=}5,\ T{=}0.5$) but yields only marginal gains on the original model, suggesting it is most beneficial for less stable models, where it helps mitigate high-variance errors.
+
 \end{abstract}
 
-\begin{IEEEkeywords}
-audio language model, audio captioning, Clotho, comparative reasoning, distributed training,
-small language model
-\end{IEEEkeywords}
+
 
 % =============================================================================
 \section{Introduction}
 \label{sec:intro}
 % =============================================================================
 
-The ability to listen to sounds, reason about their content, and generate informed natural
-language responses is a key capability in multimodal AI. Recent work has shown that
-Audio Language Models (ALMs) can perform this reasoning either with large (7B+~parameter)
-models~\cite{gong2023ltu,tang2024salmonn} or, more recently, with compact sub-billion
-parameter models~\cite{deshmukh2023pengi}. Mellow~\cite{mellow} is a notable example of the
-latter: a 167M-parameter ALM that achieves state-of-the-art performance among small models
-on the MMAU benchmark, rivalling models 50$\times$ larger, by focusing on
-\emph{reasoning-oriented} training data rather than data scale.
+The ability to perceive audio, reason over its content, and generate informed natural-language responses is a central capability in multimodal AI, with applications ranging from accessibility tools to environmental sound monitoring. Recent Audio-Language Models (ALMs) have made substantial progress on this task, but the strongest systems typically exceed several billion parameters~\cite{tang2024salmonn, gong2024listen, chu2024qwen2audio}, placing them out of reach for on-device deployment and resource-constrained applications.
 
-The central design of Mellow is a \textbf{dual-stream audio input}: the model simultaneously
-encodes two audio recordings, which enables it to perform comparative and deductive reasoning
-tasks (e.g., ``explain the difference between these two clips''). This dual-stream design maps
-naturally to the Audio Difference Explanation task~\cite{deshmukh2025adiff}, for which Clotho
-provides a ready source of environmental sound recordings with human captions.
+This has led to the development of Small Audio-Language Models (SALMs), comprising fewer than one billion parameters, that aim to retain reasoning ability while remaining practical for resource-constrained settings. A prominent example of such a model is Mellow~\cite{mellow}, introduced by Deshmukh et al. Mellow is a 167M-parameter SALM specifically designed for audio reasoning, which takes up to two audio recordings together with a text prompt as input and generates a natural-language response. The model combines an HTSAT~\cite{chen2022HTSAT} audio encoder, a non-linear projection layer, and a SmolLM2~\cite{smollm2} small language model that is fully fine-tuned during training. To train the model, the authors introduced ReasonAQA, a 1.24M-example dataset of question-answer pairs designed to enhance the logical reasoning capabilities of ALMs. Its audio files are sourced from AudioCaps~\cite{kim2019audiocaps} and Clotho~\cite{drossos2020clotho}, and it covers tasks such as captioning, multiple-choice question answering, audio entailment, and audio difference explanation. Despite its small size, Mellow surpasses all existing SALMs and achieves performance on reasoning benchmarks competitive with models 50$\times$ its size.
 
-In this work, we adapt Mellow to the Clotho V2.1 dataset~\cite{drossos2020clotho}. Because
-the full ReasonAQA training set used by the original paper requires AudioCaps in addition to
-Clotho, and AudioCaps access was not available to us, we train exclusively on Clotho. We
-construct pairwise training examples from all Clotho clip combinations, reformulating the task
-as: \textit{given two recordings $(a_1, a_2)$ and the question ``explain the difference in a
-few words'', generate a comparative description}. No architectural modifications are made.
+In this work, we reimplement Mellow and train it on the Clotho portion of ReasonAQA only (292,768 training examples), since AudioCaps was not accessible to us and our attempts to reconstruct it were unsuccessful. We describe the training procedure, including the stability issues we encountered and the changes required to obtain a stable run. We then assess the trained model on the Clotho validation set using standard captioning metrics and multiple-choice accuracy. As a further analysis, we visualise the HTSAT encoder's embeddings using t-SNE and UMAP. Lastly, we examine Self-Consistency decoding, a strategy that samples multiple stochastic generations from the model and aggregates them through majority voting. We apply it to both our model and the original Mellow weights across a range of sampled path counts and sampling temperatures. Self-Consistency yields a substantial improvement on our model in closed-ended tasks while producing only marginal gains on the original, indicating that it is most useful for less stable models, where it helps reduce high-variance decoding errors.
 
-Our contributions are:
-\begin{itemize}
-    \item A Clotho-only training recipe that adapts Mellow's pairwise comparative reasoning
-          task without architectural changes.
-    \item A detailed engineering account of the distributed training and gradient stability
-          failures encountered when adapting a large pretrained model to a small, noisy dataset.
-    \item Per-epoch captioning metrics and per-task evaluation breakdown (captioning vs.\
-          comparison vs.\ debiased inference), including a multiple-choice accuracy evaluation
-          following the original Mellow protocol.
-    \item t-SNE and UMAP analysis of HTSAT encoder embeddings, localising the generation
-          bottleneck to the cross-modal projection rather than the audio representation.
-\end{itemize}
+\noindent Our contributions are:                                                \begin{itemize}                                                                 \item A complete Clotho-only replication of Mellow with a detailed account of six distributed training and gradient stability failures, and the fixes required to reach stable training.                                              \item Per-epoch and per-task evaluation on the Clotho validation set, with an analysis localising the performance bottleneck to the cross-modal projection via t-SNE/UMAP.                                                                 \item An empirical study of Self-Consistency decoding applied to both our model and the original Mellow weights, showing $+19.7\%$ absolute accuracy gain for the undertrained model vs.\ marginal gains for the well-calibrated original.    \end{itemize}
+
+
 
 % =============================================================================
 \section{Related Work}
 \label{sec:related}
 % =============================================================================
+\textbf{Audio-Language Models and Reasoning.} Recent advancements in computational audition have transitioned the field from task-specific approaches~\cite{deshmukh2021improving, kong2020panns} to unified general-purpose Audio-Language Models (ALMs)~\cite{deshmukh2023pengi, elizalde2023clap}. These models are pretrained on large-scale audio-text datasets and achieve state-of-the-art (SoTA) performance across a wide range of tasks. As research has progressed, efforts have focused on improving ALMs, with a consistent trend toward scaling training data and model size~\cite{chu2024qwen2audio, gong2024listen, tang2024salmonn}. This has led to the emergence of capabilities not explicitly learned during training~\cite{deshmukh2024pam, deshmukh2024audio}, which were previously absent in smaller-scale models. Among these emergent capabilities, reasoning is particularly important, as real-world scenarios require ALMs to process diverse queries by integrating audio perception, language understanding, and world knowledge, and to reason over audio-text information and external knowledge. Consequently, recent studies have focused on benchmarking reasoning ability, evaluating diverse reasoning skills such as deductive, inductive, and comparative reasoning~\cite{deshmukh2024audio, deshmukh2025adiff, sakshi2024mmau}.
 
-\subsection{Audio Captioning and Datasets}
-Clotho~\cite{drossos2020clotho} and AudioCaps~\cite{kim2019audiocaps} are the two main
-benchmarks for audio captioning. Clotho consists of 4,877 Freesound recordings (15--30\,s)
-with five crowdsourced captions each (3,840 training / 1,037 validation and evaluation clips);
-AudioCaps contains 46k YouTube clips (10\,s) with one caption each. Both have been used to
-train encoder-decoder captioning systems and, more recently, as sources for the ReasonAQA
-question-answering dataset~\cite{mellow}.
+\medskip
+\noindent\textbf{Small Audio-Language Models.} While effective, large-scale ALMs are impractical for resource-constrained settings, motivating approaches that enable efficient reasoning under limited resources for real-time, on-device inference. In natural language processing, this challenge has driven the development of Small Language Models (SLMs) that retain strong performance while significantly reducing computational overhead~\cite{smollm2, abdin2024phi3, liu2024mobilellm}. In the audio domain, this has led to the emergence of Small Audio-Language Models (SALMs), comprising fewer than one billion parameters. However, until recently, the primary SALM in the literature was Pengi~\cite{deshmukh2023pengi}, which exhibits limitations in open-ended tasks such as audio question answering~\cite{gong2024listen} and reasoning-based tasks~\cite{deshmukh2024audio, deshmukh2025adiff, sakshi2024mmau}.
 
-\subsection{Audio Language Models}
-ALMs combine a pretrained audio encoder with a language model decoder.
-Pengi~\cite{deshmukh2023pengi} is the earliest small ALM (124M parameters), based on CLAP
-and GPT-2. Larger models such as LTU~\cite{gong2023ltu} and SALMONN~\cite{tang2024salmonn}
-use 7--13B parameter language models and achieve strong performance but are impractical for
-resource-constrained settings.
+\medskip
+\noindent\textbf{Mellow.} To address this gap, Deshmukh et al. introduced Mellow~\cite{mellow}, a 167M-parameter SALM specifically optimized for reasoning over audio and text. By coupling an HTSAT audio encoder~\cite{chen2022HTSAT} with a fully fine-tuned SmolLM2 language model~\cite{smollm2} via a two-layer non-linear projection, Mellow achieved state-of-the-art performance among SALMs and rivaled models 50 times its size on reasoning benchmarks. To achieve this, the authors created ReasonAQA~\cite{mellow}, a dataset of 1.24 million question-answer pairs explicitly designed to enhance audio-grounded reasoning. Mellow demonstrates that architectural refinement and targeted training data can substitute for massive parameter scaling.
 
-\subsection{Mellow}
-Mellow~\cite{mellow} (Deshmukh et al., 2025) is a 167M-parameter ALM that processes
-\emph{two} audio inputs plus a text prompt to generate a text answer. The audio encoder is
-HTSAT~\cite{chen2022hts}, a hierarchical token-semantic transformer pretrained on AudioSet.
-Encoder outputs are projected into the language model space via a non-linear two-layer MLP
-with downsampling. The language model is SmolLM2-135M~\cite{smollm2}. Training uses the
-ReasonAQA dataset (1.24M question-answer pairs over 56k AudioCaps and Clotho clips), and the
-model is evaluated on MMAU, Audio Entailment, Audio Difference, and ClothoAQA benchmarks.
+
 
 % =============================================================================
 \section{Method}
 \label{sec:method}
 % =============================================================================
 
-\subsection{Task Reformulation}
+\subsection{Training Data}
 
-The original Mellow training task uses ReasonAQA, which covers AudioCaps and Clotho across
-several task subtypes (MCQ, detail captioning, audio difference, audio entailment). Since we
-were limited to Clotho V2.1, we use the Clotho-only portion of the ReasonAQA data files,
-which span six subtypes: Clotho-MCQ (95,551 examples), Clotho-Detail (94,838), CLD audio
-difference (57,585 across three sub-files), Clotho captioning (19,195), ClothoAQA (14,088),
-and CLE entailment (11,511), totalling 292,768 training examples across 5,014 clips. The
-validation split yields $\sim$80,000 examples by the same construction.
-
-Each training example takes the form:
-\begin{align}
-    \text{input} &= (a_i,\; a_j,\; q) \nonumber\\
-    \text{target} &= t \nonumber
-\end{align}
-where $a_i$, $a_j$ are the audio clips (identical for single-clip tasks), $q$ is the
-task-specific question, and $t$ is the target answer from the ReasonAQA annotation. For
-captioning examples, $a_i = a_j$ and $t$ is one of the five Clotho reference captions,
-sampled uniformly at each epoch.
+Since we were limited to Clotho V2.1, we use the Clotho-only portion of ReasonAQA, spanning six subtypes: Clotho-MCQ (95,551), Clotho-Detail (94,838), CLD audio difference (57,585), Clotho captioning (19,195), ClothoAQA (14,088), and CLE entailment (11,511) — totalling 292,768 training examples across 5,014 clips ($\sim$80,000 validation examples). Each example is a tuple $(a_i, a_j, q) \to t$, where $a_i$, $a_j$ are audio clips, $q$ is the task question, and $t$ is the target answer. For captioning, $a_j$ is a randomly sampled clip from the dataset (not $a_i$), the prompt instructs the model to caption only $a_i$, and $t$ is one of five Clotho reference captions for $a_i$, sampled uniformly per epoch.
 
 \subsection{Architecture}
 
 We use the Mellow architecture without modification (Figure~\ref{fig:arch}).
 
-\textbf{Audio encoder.} HTSAT processes each 10\,s / 32\,kHz waveform independently and
-produces a framewise output $(T \times 768)$ and a latent CLS output $(1 \times 768)$.
-Clotho clips (15--30\,s) are cropped to 10\,s via a uniformly random temporal window
-re-sampled at each epoch; clips shorter than 10\,s are zero-padded.
-
-\textbf{Mapper.} A linear layer projects the CLS token to the framewise feature dimension;
-the two are concatenated and passed through a non-linear two-layer projection (GeLU + dropout
-+ residual add + LayerNorm) followed by $8\times$ average pooling.
-
-\textbf{Language model.} SmolLM2-135M receives the concatenated prefix
-$[\text{proj}(a_1),\; s,\; \text{proj}(a_2),\; s,\; \text{embed}(q)]$ and is trained with
-cross-entropy next-token prediction loss:
+\textbf{Audio encoder:} HTSAT processes each 10\,s / 32\,kHz waveform independently. Clotho clips (15--30\,s) are cropped to 10\,s via a random temporal window; shorter clips are zero-padded.                                                                                            \textbf{Mapper:} The full HTSAT output ($T \times 768$, CLS token at index~0 + framewise tokens) passes through a two-layer MLP (linear $768{\to}576$ + GeLU + dropout + residual add + LayerNorm), then $8\times$ average pooling, yielding $\lfloor(T{-}1)/8\rfloor + 1$ tokens per stream.
+\textbf{Language model:} SmolLM2-135M receives $[\text{proj}(a_1),\, s,\, \text{proj}(a_2),\, s,\, \text{embed}(q)]$ and is trained with cross-entropy loss:
 \begin{equation}
-    \mathcal{L} = -\sum_{t=1}^{T} \log p_\theta\!\left(x_t \mid x_{1:t-1},\, A_1,\, A_2\right)
-\end{equation}
-
-\textbf{Trainable parameters.} The HTSAT backbone and its adjacent \texttt{c2l} projection
-are frozen. The mapper MLP, LayerNorm, and all SmolLM2-135M weights are fine-tuned
-(approximately 140M trainable parameters).
+    \mathcal{L} = -\sum_{t=1}^{T} \log p_\theta(x_t \mid x_{1:t-1}, A_1, A_2)
+\end{equation}                                                           \textbf{Trainable parameters:} HTSAT and its adjacent \texttt{c2l} projection are frozen; the mapper MLP and all SmolLM2-135M weights are fine-tuned (${\approx}140$M parameters).
 
 \begin{figure}[t]
     \centering
     \includegraphics[width=\columnwidth]{figures/fig_arch.png}
-    \caption{Mellow architecture (reproduced from \cite{mellow}): two audio streams are
-    independently encoded by HTSAT and mapped into the LM embedding space, then concatenated
-    with the text prompt embedding to form a prefix for SmolLM2-135M. The mapper detail
-    (centre) shows the linear alignment and $8\times$ downsample steps; the projection detail
-    (right) shows the two-layer MLP with GeLU, dropout, residual add, and LayerNorm.}
+    \caption{Mellow architecture (reproduced from \cite{mellow}): two audio streams are independently encoded by HTSAT and mapped into the LM embedding space, then concatenated
+    with the text prompt embedding to form a prefix for SmolLM2-135M.}
     \label{fig:arch}
 \end{figure}
 
-\subsection{Training Configuration}
+\subsection{Experimental Setup}
 
-Training ran on 4$\times$ NVIDIA Titan GPUs via PyTorch DistributedDataParallel (DDP) with
-the NCCL backend. Key hyperparameters are listed in Table~\ref{tab:config}. The learning
-rate was reduced from $10^{-3}$ (initial, unstable) to $10^{-4}$ and finally to
-$5\times10^{-5}$ after applying gradient stability fixes.
+We implemented the training pipeline in Python~3.10, adapting the original Mellow repository~\cite{mellow} for our Clotho-only setup; the HTSAT encoder weights were downloaded from the authors' release, and SmolLM2-135M was loaded via HuggingFace Transformers~\cite{wolf2020huggingfaces}. Training ran on 4$\times$ NVIDIA Titan GPUs via PyTorch DDP (NCCL backend). The learning rate was reduced from $10^{-3}$ (unstable) to $10^{-4}$ and finally $5{\times}10^{-5}$ after applying stability fixes described below. Key hyperparameters are listed in Table~\ref{tab:config}.
 
 \begin{table}[h]
 \centering
@@ -208,97 +129,35 @@ Total training time & $\approx$17 hours \\
 
 \subsection{Evaluation Metrics}
 
-We evaluate open-ended generation against the five reference captions per clip using four
-metrics. \textbf{BLEU-1} and \textbf{BLEU-4}~\cite{papineni2002bleu} measure unigram and
-4-gram precision respectively; BLEU-4 is a standard captioning baseline but is sensitive to
-short outputs. \textbf{ROUGE-L} measures longest common subsequence recall, providing a
-complementary length-robust signal. \textbf{CIDEr}~\cite{vedantam2015cider} weights $n$-grams
-by TF-IDF, rewarding descriptions that are both accurate and discriminative across the
-reference set; it is the primary open-ended metric in our evaluation. SPICE~\cite{anderson2016spice}
-and METEOR~\cite{banerjee2005meteor}, used in the original Mellow paper, could not be computed
-in our environment: SPICE requires a Java runtime, and METEOR was not available in the
-evaluation pipeline. We therefore use CIDEr as our primary metric and compare to the
-original paper's SPICE score only where reported.
+We evaluate open-ended generation against five reference captions per clip.
+\textbf{BLEU-1/4}~\cite{papineni2002bleu} measure unigram and 4-gram precision.
+\textbf{ROUGE-L} measures longest common subsequence recall. \textbf{CIDEr}~\cite{vedantam2015cider} weights $n$-grams by TF-IDF and is our primary metric. SPICE and METEOR (used in the original paper) were unavailable in our environment (SPICE requires Java). For closed-ended tasks we report accuracy vs.\ random-chance (25\% for 4-choice; 50\% for yes/no) and \textbf{debiased inference} (blocks MC option tokens \texttt{a)/b)/c)/d)} at decoding time).
 
-For closed-ended tasks we report accuracy against the random-chance baseline (25\% for
-4-choice tasks; 50\% for binary yes/no tasks). We also report results for \textbf{debiased
-inference}, a decoding variant that blocks multiple-choice option tokens
-(\texttt{a)}/\texttt{b)}/\texttt{c)}/\texttt{d)}) to assess whether MC-format bias affects
-generation quality.
+\subsection{Challenges}
 
-% =============================================================================
-\section{Engineering Challenges}
-\label{sec:challenges}
-% =============================================================================
-
-Adapting a model pretrained on a large, curated dataset (ReasonAQA, 56k clips) to a smaller,
-heterogeneous corpus (Clotho, 3,840 clips) in a distributed setting introduced several
-non-trivial failures.
-
-\textbf{Checkpoint I/O contention.} All four DDP ranks attempted to load the 1.7\,GB
-checkpoint simultaneously from NFS, saturating I/O within the NCCL watchdog window
-(7,200\,s). Fix: rank 0 copies the checkpoint to \texttt{/dev/shm} (RAM-backed FS), issues a
-barrier, then all ranks load from RAM, reducing NFS reads from $4\times$ to $1\times$.
-
-\textbf{Optimizer broadcast deadlock.} An earlier rank-0-only loading attempt caused rank 0
-to issue $N$ broadcasts (one per optimizer state tensor) while other ranks issued 0,
-stalling all collectives. Fix: symmetric loading from the shared RAM path on all ranks.
-
-\textbf{Corrupted audio (NaN/Inf waveforms).} Some Clotho files contain NaN or Inf samples
-from encoding artifacts. These propagate through HTSAT to produce NaN loss. Fix: a
-pre-forward guard checks \texttt{torch.isfinite()} across all ranks via
-\texttt{all\_reduce(sum)}; any batch containing a corrupted sample is skipped on all ranks.
-
-\textbf{Out-of-distribution amplitude.} Even after the NaN guard, $\sim$63\% of steps were
-skipped. Some files have finite amplitudes up to $|x|\approx 100$, far outside HTSAT's
-expected $[-1,1]$ range, causing log-mel overflow (Figure~\ref{fig:waveforms}). Fix: extend
-the guard to reject waveforms with $\max|x| \geq 1.5$. After this change, the skip rate
-dropped to 0\%.
+Adapting Mellow to Clotho in a distributed setting introduced six non-trivial failures (Table~\ref{tab:skiprates}).
+\textbf{Checkpoint I/O contention:} all four ranks loading the 1.7\,GB checkpoint from NFS simultaneously saturated I/O; fixed by rank~0 copying to \texttt{/dev/shm}, then all ranks loading from RAM.
+\textbf{Optimizer broadcast deadlock:} rank-0-only loading caused asymmetric broadcast counts; fixed by symmetric loading.
+\textbf{Corrupted audio:} NaN/Inf waveforms in some Clotho files propagate to NaN loss; fixed via
+\texttt{all\_reduce(isfinite)} guard skipping affected batches on all ranks. \textbf{OOD amplitude:} finite waveforms with $|x|\!\approx\!100$ cause log-mel overflow (Figure~\ref{fig:waveforms}); fixed by rejecting $\max|x|\!\geq\!1.5$, reducing skip rate from 63\% to 5\%.
+\textbf{Unfrozen \texttt{c2l} layer:} freezing only
+\texttt{self.base.htsat} left an adjacent linear layer trainable; its weights grew until gradients overflowed; fixed by freezing
+\texttt{self.base} entirely. \textbf{LayerNorm scale drift:} $\gamma$ grew from 1.0 to ${\approx}6.2$ over three epochs (Figure~\ref{fig:gamma}), causing 99\% skip rate on checkpoint resume; fixed by resetting $\gamma\!=\!1.0$, clamping projections to $[-2,2]$, and replacing skip-on-NaN-gradient with \texttt{nan\_to\_num}.
 
 \begin{figure}[t]
     \centering
     \includegraphics[width=\columnwidth]{figures/fig3_waveforms.png}
-    \caption{Clean vs.\ out-of-distribution Clotho audio. Top row: waveforms showing
-    normal amplitude in $[-1,1]$ (left) vs.\ amplitude $\approx$80 (right). Bottom row:
-    corresponding log-mel spectrograms. The OOD spectrogram is saturated, causing
-    log-mel overflow and NaN gradients inside HTSAT.}
+    \caption{Clean vs.\ OOD Clotho audio. Normal amplitude $[-1,1]$ (left) vs.\ amplitude ${\approx}80$ (right); corresponding log-mel spectrograms below. The OOD spectrogram is saturated, causing NaN gradients inside HTSAT.}
     \label{fig:waveforms}
 \end{figure}
 
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{figures/fig6_frequency_analysis.png}
-    \caption{Spectral properties of clean vs.\ out-of-distribution audio. OOD files have
-    RMS energy $\approx$80$\times$ higher than clean files, causing log-mel spectrogram
-    overflow and NaN gradients inside HTSAT. The pre-forward amplitude guard (reject if
-    $\max|x| \geq 1.5$) filters these files before they reach the encoder.}
-    \label{fig:freqanalysis}
-\end{figure}
-
-\textbf{Unfrozen adjacent projection layer.} The HTSAT wrapper contains a \texttt{c2l}
-linear layer (527 $\to$ 768) outside the \texttt{htsat} submodule. Freezing only
-\texttt{self.base.htsat} left \texttt{c2l} trainable; after four epochs its weights grew
-until gradients overflowed. Fix: freeze \texttt{self.base} entirely.
-
-\textbf{LayerNorm scale drift.} The projection LayerNorm scale $\gamma$ grew from 1.0 to
-$\approx$6.2 over three epochs, amplifying activations to $\sim$10--11. On checkpoint
-resume, this caused 99\% step skip rate due to NaN gradients in SmolLM2's backward pass
-(Figure~\ref{fig:gamma}). Fixes: reset $\gamma = 1.0$ on resume; tighten projection clamp
-from $[-5,5]$ to $[-2,2]$; replace skip-on-NaN-gradient with \texttt{nan\_to\_num}
-(proceed if loss is finite).
 
 \begin{figure}[t]
     \centering
     \includegraphics[width=\columnwidth]{figures/fig4_gamma_drift.png}
-    \caption{LayerNorm scale drift. Left: $\gamma$ growing from 1.0 to 6.2 over 3 epochs.
-    Right: projection output range at different $\gamma$ values, with the $\pm2$ clamp
-    boundary marked. The large $\gamma$ at checkpoint resume caused 99\% batch skip rate.}
+    \caption{LayerNorm scale drift: $\gamma$ growing to 6.2 over 3 epochs (left) and projection output range at different $\gamma$ values with the $\pm2$ clamp marked (right). The large $\gamma$ at resume caused 99\% batch skip rate.}
     \label{fig:gamma}
 \end{figure}
-
-Table~\ref{tab:skiprates} summarises the skip rate at each debugging stage. After applying
-all fixes, the model trained for a further 7 epochs (epochs 4--10) with a 0\% skip rate;
-results from this stable run are reported in Section~\ref{sec:results}.
 
 \begin{table}[h]
 \centering
@@ -320,101 +179,60 @@ Epochs 4--10 (final stable run)             & 0\% \\
 \end{table}
 
 % =============================================================================
-\section{Results}
+\section{Results and Discussion}
 \label{sec:results}
 % =============================================================================
 
-\subsection{Training Loss and Per-Epoch Metrics}
+\subsection{Training Convergence}
+Training loss decreased from $\approx6.2$ at the start of epoch~4 to $\approx2.88$ at epoch~10 with no further skipped batches (Figure~\ref{fig:loss}). Figure~\ref{fig:cider_curve} shows CIDEr, BLEU-1, and ROUGE-L on a fixed 500-sample captioning subset per checkpoint: near-zero at epoch~4 (immediately after stability fixes), rising sharply at epoch~5, then plateauing at CIDEr~$\approx0.012$--$0.015$, confirming convergence within the Clotho-only budget. The best checkpoint by CIDEr is epoch~9.
 
-Training loss decreased from $\approx 6.2$ at the start of epoch 4 (after applying all
-stability fixes) to $\approx 2.88$ at epoch 10, with no further skipped batches
-(Figure~\ref{fig:loss}).
 
 \begin{figure}[t]
     \centering
     \includegraphics[width=\columnwidth]{figures/fig1_loss_curve.png}
-    \caption{Training loss. Left: loss per epoch over all 10 epochs; the dip at epoch 4
-    marks the restart after the frozen-layer bug was fixed. Right: zoom into the first
-    500 steps of epoch 4, showing loss dropping from $\approx$6.2 to $\approx$4.9,
-    confirming that the fixes took effect immediately.}
+    \caption{Training loss per epoch (left) and zoom into the first 500 steps of epoch~4 (right). The dip at epoch~4 marks the restart after all stability fixes were applied; loss drops from $\approx6.2$ to $\approx4.9$ immediately, confirming the fixes took effect.}
     \label{fig:loss}
 \end{figure}
-
-Figure~\ref{fig:cider_curve} shows CIDEr, BLEU-1, and ROUGE-L evaluated on a fixed
-500-sample captioning subset at each epoch checkpoint.
 
 \begin{figure}[t]
     \centering
     \includegraphics[width=\columnwidth]{figures/fig_cider_curve.png}
-    \caption{Per-epoch CIDEr, BLEU-1, and ROUGE-L on a fixed 500-sample captioning subset
-    (epochs 4--10). The near-zero scores at epoch~4 correspond to the checkpoint immediately
-    after the NaN/frozen-layer bug fix; the sharp rise at epoch~5 confirms the model began
-    learning audio-grounded language generation. Metrics plateau at epochs 5--10
-    (CIDEr $\approx 0.012$--$0.015$), indicating convergence within the Clotho-only training
-    budget. The best checkpoint by CIDEr is epoch~9.}
+    \caption{Per-epoch CIDEr, BLEU-1, and ROUGE-L on a fixed 500-sample captioning subset (epochs 4--10). The sharp rise at epoch~5 confirms the model began learning audio-grounded language generation; metrics plateau at epochs 5--10, indicating convergence. Best checkpoint by CIDEr is epoch~9.}
     \label{fig:cider_curve}
 \end{figure}
 
-\begin{table}[h]
-\centering
-\caption{Per-epoch captioning metrics on a fixed 500-sample subset.}
-\label{tab:epoch_metrics}
-\begin{tabular}{cccc}
-\toprule
-\textbf{Epoch} & \textbf{CIDEr} & \textbf{BLEU-1} & \textbf{ROUGE-L} \\
-\midrule
-4  & 0.000 & 0.007 & 0.014 \\
-5  & 0.012 & 0.102 & 0.083 \\
-6  & 0.011 & 0.092 & 0.081 \\
-7  & 0.013 & 0.095 & 0.082 \\
-8  & 0.014 & 0.089 & 0.081 \\
-9  & \textbf{0.015} & \textbf{0.095} & \textbf{0.083} \\
-10 & 0.014 & 0.093 & 0.082 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
 \subsection{Quantitative Results}
 
-Table~\ref{tab:results} reports generation metrics on the Clotho validation set using the
-epoch-10 checkpoint, broken down by evaluation condition. For reference, we include the SPICE
-score reported by the original Mellow model on the Clotho captioning task (Type 4 training,
-Table~8 of~\cite{mellow}).
+Table~\ref{tab:results} reports generation metrics on the Clotho validation set (epoch-10 checkpoint). Captioning CIDEr (0.011) is ${\approx}3.7\times$ higher than comparison (0.003), confirming pairwise audio comparison is harder — the model can describe individual clips but struggles to reason contrastively. BLEU-1 on captioning (0.096) is relatively high while BLEU-4$=0.000$, indicating correct vocabulary but no 4-gram structure. ROUGE-L is flat across all conditions ($\approx0.08$), suggesting a fixed output style regardless of task. Debiased inference \emph{hurts} rather than helps: CIDEr drops from 0.027 to 0.025 and BLEU-1 collapses from 0.052 to 0.015 — the model has become dependent on MC-style vocabulary for fluency, so removing those tokens produces more degenerate output. This MC-format contamination stems from the 95k Clotho-MCQ examples dominating the output-format prior; the root fix is rebalancing the training mixture, not post-hoc token blocking.
+
+
+\begin{table}[h]
+  \centering
+  \caption{Generation metrics on the Clotho validation set (epoch-10 checkpoint). For reference, the original Mellow reports SPICE$=9.38$ on Clotho captioning (Table~8 of~\cite{mellow}); SPICE was unavailable in our setup (requires Java).}
+  \label{tab:results}
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{lcccc}
+  \toprule
+  \textbf{Condition} & \textbf{BLEU-1} & \textbf{BLEU-4} & \textbf{ROUGE-L} & \textbf{CIDEr} \\
+  \midrule
+  Mixed$^1$        & 0.052 & 0.005 & 0.086 & 0.027 \\
+  Captioning only  & 0.096 & 0.000 & 0.084 & 0.011 \\
+  Comparison only  & 0.003 & 0.000 & 0.079 & 0.003 \\
+  Debiased$^2$     & 0.015 & 0.001 & 0.057 & 0.025 \\
+  \bottomrule
+  \end{tabular}
+  \vspace{2pt}
+  {\footnotesize $^1$Full set, both Captioning + Comparison.\\
+  \footnotesize $^2$Blocks MC option tokens (\texttt{a)}/\texttt{b)}/\texttt{c)}/\texttt{d)}) during decoding on the full set.}
+  \end{table}
+
+Table~\ref{tab:mc_accuracy} reports multiple-choice accuracy. Clotho-MCQ (28.0\%) exceeds the 25\% random baseline — weak but positive evidence of learned audio content. CLE hypothesis (21.2\%) falls below random, indicating no entailment reasoning. ClothoAQA yes/no (4.6\%) is near zero: the model almost never produces ``yes'' or ``no'', instead generating long-form sentences — a direct consequence of training on 293k long-form comparison targets, which established a verbose output prior so strong it overrides even binary-answer prompts. A follow-up analysis using Self-Consistency is presented in Section~\ref{sc}.
 
 \begin{table}[h]
 \centering
-\caption{Generation metrics on the Clotho validation set (epoch-10 checkpoint, i.e., the
-final training state). ``Mixed'' evaluates the full validation set (all task subtypes
-combined); ``Captioning'' and ``Comparison'' evaluate each subset separately; ``Debiased''
-blocks MC option tokens during decoding on the full set. The best-CIDEr checkpoint is
-epoch~9 (captioning CIDEr$=0.015$ vs.\ $0.014$ at epoch~10); all rows here use epoch~10
-to report the model's state after full training.}
-\label{tab:results}
-\begin{tabular}{lcccc}
-\toprule
-\textbf{Condition} & \textbf{BLEU-1} & \textbf{BLEU-4} & \textbf{ROUGE-L} & \textbf{CIDEr} \\
-\midrule
-Mellow (orig., CL)$^\dagger$   & --    & --    & --    & -- \\
-Mixed (captioning + comparison) & 0.052 & 0.005 & 0.086 & 0.027 \\
-Captioning only               & 0.096 & 0.000 & 0.084 & 0.011 \\
-Comparison only               & 0.003 & 0.000 & 0.079 & 0.003 \\
-Debiased (block MC tokens)    & 0.015 & 0.001 & 0.057 & 0.025 \\
-\bottomrule
-\end{tabular}
-\vspace{2pt}
-{\footnotesize $^\dagger$Original Mellow reports SPICE$=9.38$ on Clotho captioning
-(Table~8 of~\cite{mellow}); BLEU/ROUGE/CIDEr not reported for this condition.
-SPICE was unavailable in our setup (requires Java).}
-\end{table}
-
-Table~\ref{tab:mc_accuracy} reports multiple-choice accuracy on three closed-ended tasks,
-evaluated on 500 samples per task at the epoch-10 checkpoint.
-
-\begin{table}[h]
-\centering
-\caption{Multiple-choice accuracy vs.\ random-chance baseline (epoch-10 checkpoint,
-500 samples/task). $\dagger$ = below random.}
+\caption{Multiple-choice accuracy vs.\ random-chance baseline (epoch-10 checkpoint, 500 samples/task). $\dagger$ = below random.}
 \label{tab:mc_accuracy}
+\setlength{\tabcolsep}{3pt}
 \begin{tabular}{lccc}
 \toprule
 \textbf{Task} & \textbf{Accuracy} & \textbf{Random} & \textbf{$\Delta$} \\
@@ -426,32 +244,9 @@ ClothoAQA yes/no           &  4.6\% & 50.0\% & $-45.4\%$$^\dagger$ \\
 \end{tabular}
 \end{table}
 
-Several patterns emerge from the per-task breakdown. Captioning CIDEr (0.011) is $4\times$
-higher than comparison (0.003), confirming that pairwise audio comparison is a harder and more
-novel task — the model has some ability to describe individual clips but struggles to reason
-contrastively across two inputs. BLEU-1 on captioning (0.096) is relatively high while
-BLEU-4$=0.000$, indicating correct vocabulary but wrong $n$-gram structure, consistent with
-the word-frequency analysis in Figure~\ref{fig:wordcloud}. ROUGE-L is flat across all
-conditions ($\approx0.08$), suggesting the model has converged on a fixed output style
-regardless of task. Debiased inference (blocking MC option tokens \texttt{a)}/\texttt{b)}/\texttt{c)})
-does \emph{not} improve performance: CIDEr drops from 0.027 to 0.025 and BLEU-1 collapses
-from 0.052 to 0.015. The model depends on MC-style vocabulary for fluency; removing it
-degrades rather than corrects the output.
-
-On closed-ended tasks (Table~\ref{tab:mc_accuracy}), Clotho-MCQ accuracy (28.0\%) exceeds
-the 25\% random baseline, providing weak but positive evidence that the model has learned
-audio content. CLE hypothesis verification (21.2\%) falls below random, indicating the model
-has not acquired entailment reasoning. ClothoAQA yes/no accuracy (4.6\%) is near zero: the
-model almost never generates ``yes'' or ``no'', producing long-form sentences instead — a
-direct consequence of training predominantly on long-form comparison outputs (293k examples)
-which established a strong verbose output-format prior.
-
 \subsection{Qualitative Results}
 
-Table~\ref{tab:qualitative} shows five representative outputs spanning the quality range
-observed at epoch 10. The model has acquired a genuine audio vocabulary (frequency, timbre,
-loudness, spectral energy) and uses comparative connectives (``while Audio'', ``whereas'',
-``featuring'', ``differs in''). However, output quality is highly inconsistent.
+Table~\ref{tab:qualitative} shows representative outputs at epoch~10. The model acquired genuine audio vocabulary (frequency, timbre, loudness) and comparative connectives, but output quality is inconsistent. Word-frequency analysis over 102,841 tokens from 20,000 evaluation samples shows 17 of the top-20 words are shared with reference captions - the failure is therefore not lexical but structural: the model generates plausible word combinations that lack grounding to the actual audio input. Two failure types stand out: \textit{language failures} (incomplete sentences, MC-format prefixes) from training data distribution artifacts, and \textit{grounding failures} (hallucinated DSP jargon such as ``psychoacophony'', ``high-8 khz'') from the model filling gaps with LM priors rather than audio evidence.
 
 \begin{table}[h]
 \centering
@@ -471,144 +266,35 @@ Incoherent jargon  & ``high-8 khz. the listener. The loudness and animal sounds 
 \end{tabular}
 \end{table}
 
-Figure~\ref{fig:qualitative} provides a colour-coded visual summary of these output categories.
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{figures/fig7_qualitative_examples.png}
-    \caption{Representative generated outputs from the epoch-10 checkpoint on the Clotho
-    validation set. Green: fluent and grounded outputs. Orange: partial failures — format
-    bias (outputs starting with ``b)/c)'') or hallucinated DSP jargon. Red: incomplete
-    outputs (``The audio~''). The model has learned audio vocabulary and comparative
-    structure but lacks consistent grounding to the actual audio content.}
-    \label{fig:qualitative}
-\end{figure}
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{figures/fig9_wordcloud.png}
-    \caption{Top-30 word frequency comparison between model outputs and reference captions
-    (102,841 tokens from 20,000 evaluation samples). Seventeen of the top-20 words are
-    shared, indicating successful domain-level vocabulary adaptation. The model's failures
-    are therefore not lexical but structural: it generates plausible word combinations that
-    lack coherent grounding to the actual audio input.}
-    \label{fig:wordcloud}
-\end{figure}
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{figures/fig8_output_lengths.png}
-    \caption{Distribution of generated output lengths at epoch 10. Left: histogram showing
-    a bimodal distribution — a peak at very short outputs (1--3 words: ``yes'',
-    ``The audio~'') and a broader peak at 10--25 words. Right: CDF showing that
-    approximately 37\% of outputs are $\leq$5 words on the standard epoch-10 run,
-    indicating the model frequently produces incomplete responses.}
-    \label{fig:lengths}
-\end{figure}
-
 \subsection{Encoder Representation Quality}
-
-To determine whether the weak CIDEr score reflects a failure in the audio encoder or in the
-language model, we extracted HTSAT embeddings for $\sim$1,390 Clotho validation clips and
-visualised them with t-SNE (Figure~\ref{fig:tsne}).
+To determine whether weak CIDEr reflects encoder failure or LM failure, we extracted HTSAT embeddings for $\sim$1,390 Clotho validation clips and visualised them with t-SNE and UMAP (Figure~\ref{fig:tsne}). Both methods show semantically meaningful clusters — animal sounds tightly separated from vehicles; human voice and music broader but coherent — without any encoder fine-tuning. This confirms that the frozen encoder produces semantically meaningful representations; the performance gap therefore lies in the cross-modal projection and language model, not in audio understanding.
 
 \begin{figure}[t]
     \centering
     \includegraphics[width=0.49\columnwidth]{figures/tsne.png}
     \hfill
     \includegraphics[width=0.49\columnwidth]{figures/umap.png}
-    \caption{HTSAT embedding space for $\sim$1,390 Clotho validation clips visualised with
-    t-SNE (left) and UMAP (right). Both methods independently show the same structure:
-    Animal sounds form a tight, well-separated cluster; Vehicle and Domestic sounds occupy
-    a distinct region; Human voice and Music are coherent but broader, consistent with their
-    greater acoustic diversity. The agreement across two dimensionality reduction methods
-    confirms the encoder produces semantically meaningful representations independent of the
-    language model's generation quality.}
+    \caption{HTSAT embeddings for $\sim$1,390 Clotho validation clips: t-SNE (left) and UMAP (right). Both independently show tight animal-sound clusters, a distinct vehicle/domestic region, and broader human-voice/music clusters - confirming semantically meaningful representations without encoder fine-tuning.}
     \label{fig:tsne}
 \end{figure}
 
-The clusters are semantically meaningful without any fine-tuning of the encoder: animal sounds
-are tightly grouped and clearly separated from vehicles and mechanical sounds; human voice and
-music overlap appropriately given their acoustic diversity. This localises the generation
-bottleneck to the \emph{projection and language model} side, not to the audio representation.
-The encoder is functioning correctly; the cross-modal grounding between audio tokens and text
-generation is where the system fails.
+\subsection{Self-Consistency Decoding}\label{sc}
 
-% =============================================================================
-\section{Discussion}
-\label{sec:discussion}
-% =============================================================================
+Self-Consistency (SC) is a decoding strategy designed to enhance the reliability of language models by replacing deterministic greedy search with a consensus-based approach. For tasks such as Clotho MCQ and ClothoAQA, which involve constrained output spaces, standard decoding can be highly sensitive to local token probabilities. SC mitigates this instability by sampling $N$ independent reasoning paths from the model's decoder and applying a majority vote to determine the final answer. This method effectively marginalizes out individual sampling errors, allowing the most logically consistent conclusion to emerge as the model's prediction.
 
-\textbf{Form without content.} The central finding from qualitative and vocabulary
-analysis is that the model has achieved \emph{lexical} success but \emph{structural} failure.
-Word frequency analysis over 102,841 tokens from 20,000 evaluation samples reveals that 17 of
-the top-20 most frequent words are identical between model outputs and reference captions
-(Figure~\ref{fig:wordcloud}). The model correctly acquired domain vocabulary — sounds,
-frequencies, loudness, water, dynamic, whereas — without explicit supervision at the word
-level. The failure is therefore not one of missing vocabulary but of reasoning: the model
-combines correct words into incoherent or ungrounded sequences rather than descriptions
-anchored to the actual audio input. This failure splits into two distinct types:
+We evaluated the Self-Consistency framework using a test set of 2,000 samples comprised of Clotho MCQ and ClothoAQA instances. While the original Mellow paper utilized a fixed temperature of $T=1.0$ as a baseline for all experiments, we conducted a grid search across $N \in \{1, 3, 5\}$ and $T \in \{1.0, 0.7, 0.5\}$ to investigate whether lower temperatures could further improve voting accuracy. This grid search was executed in parallel for two distinct model variants: our custom-trained model and the original model weights provided in the Mellow paper. Our primary objective was to quantify the performance gain provided by increased sampling iterations ($N$) and to determine if the $T=1.0$ setting remains the optimal diversity threshold for audio-linguistic reasoning.
 
-\textit{(1) Language failures} — incomplete sentences (``The audio~'') and format bias
-(``c)~calm~'') — are artifacts of the training data distribution. ReasonAQA mixes
-multiple-choice and descriptive formats; our pairwise targets do not, but the base model
-checkpoint already exhibits these patterns. These would likely improve with additional
-epochs, a larger dataset, or constrained decoding.
+Table~\ref{tab:sc_results} summarizes the accuracy of both our partially-trained model and the original paper model across the self-consistency (SC) grid.
+For our model, which operates in a low-data regime, SC provides substantial gains. Starting from a baseline accuracy of 27.15\%, increasing the number of sampled reasoning paths and aggregating via majority voting yields an absolute improvement of nearly 20\%. This indicates that SC can partially compensate for insufficient training by reducing the effect of stochastic decoding errors.
 
-\textit{(2) Grounding failures} — hallucinated DSP jargon (``high-8 khz'',
-``psychoacophony'', ``attention-frequency'') and plausible-but-wrong descriptions — indicate
-that the model is filling in gaps with language-model priors rather than audio evidence.
-Addressing this requires either LLM-generated contrastive targets (so the model learns to
-reason about actual differences) or the addition of AudioCaps to increase audio concept
-coverage.
-
-\textbf{Effect of Clotho-only training.} The original Mellow trains on a mixture of
-AudioCaps and Clotho. Restricting to Clotho limits the acoustic vocabulary and reduces the
-diversity of audio events seen during training, which is the most likely cause of the
-grounding failures above.
-
-\textbf{Pairwise reformulation.} Our targets are concatenated captions (``[cap$(a_1)$],
-while [cap$(a_2)$]''), which are only weakly comparative. They describe each clip
-independently rather than contrasting acoustic properties. This explains why the model
-learned comparative connectives but failed to use them meaningfully.
-
-\textbf{Multiple-choice format contamination.} Our training mix contains approximately
-95k multiple-choice style examples (from the base Mellow checkpoint's ReasonAQA pretraining)
-versus 19k captioning examples. This imbalance causes the model to emit MC-style prefixes
-(``b)~...'', ``c)~...'') even on single-clip captioning prompts where no options are provided.
-The contamination is cross-task: it appears on both the comparison and captioning sub-tasks,
-confirming it is a training-distribution artifact rather than a task-specific failure.
-A natural mitigation is debiased inference — blocking option tokens (\texttt{a)},
-\texttt{b)}, \texttt{c)}) at decoding time. However, this \emph{hurts} rather than helps:
-BLEU-1 collapses from 0.052 to 0.015 and CIDEr falls from 0.027 to 0.025
-(Table~\ref{tab:results}). The model has become dependent on MC vocabulary for fluency;
-removing those tokens causes it to produce even shorter or more degenerate outputs. The root
-fix requires rebalancing the training mixture, not post-hoc token blocking.
-
-\textbf{Verbose output-format prior.} The near-zero yes/no accuracy (4.6\%) is not a
-knowledge failure — it is a format failure. The model was trained on 293k long-form
-comparison targets, establishing a prior so strong that it overrides even binary-answer
-prompts. This is corroborated by the output length distribution (Figure~\ref{fig:lengths}),
-which shows the model rarely generates outputs under 5 words. The verbose prior and the
-MC-prefix bias are two faces of the same root cause: the training mixture is dominated by
-one output style, leaving the model unable to switch register when the task demands it.
-
-\textbf{Engineering cost.} The corrupted amplitude issue ($\sim$63\% initial skip rate) is
-a known property of Freesound-sourced data and would affect any model relying on normalized
-audio representations.
+In contrast, the well-calibrated original Mellow model gains little from increasing $N$ or manipulating $T$ via self-consistency, suggesting it already performs near-optimally under greedy decoding. Ultimately, SC is most beneficial for less stable or undertrained models, serving as a critical mechanism to mitigate the high-variance errors inherent in single-pass decoding.
 
 % =============================================================================
 \section{Future Work}
 \label{sec:future}
 % =============================================================================
 
-\textbf{LLM-generated contrastive targets.} Our training targets are simple caption
-concatenations. Instead, one could prompt an LLM (e.g., LLaMA 3~\cite{dubey2024llama}) with
-both captions to generate a sentence that explicitly describes the difference (e.g., ``the
-first clip features outdoor wind, while the second features indoor machine noise''). This
-approach is used in the CLD dataset~\cite{deshmukh2025adiff}. The model would be trained on
-genuinely contrastive targets rather than independent descriptions, encouraging stronger
-grounding. Trade-off: LLM inference over 293k pairs costs $\sim$1--2 GPU-days, and
+\textbf{LLM-generated contrastive targets.} While the CLD subset provides genuinely contrastive targets, the remaining subtypes (Clotho-Detail, Clotho-MCQ) do not explicitly describe audio differences. One could prompt an LLM (e.g., LLaMA 3~\cite{dubey2024llama}) with both captions to generate a sentence that explicitly describes the difference (e.g., ``the first clip features outdoor wind, while the second features indoor machine noise''). This approach is used in the CLD dataset~\cite{deshmukh2025adiff}. The model would be trained on genuinely contrastive targets, encouraging stronger grounding. Trade-off: LLM inference over 293k pairs costs $\sim$1--2 GPU-days, and
 hallucinations in generated answers would inject noise into the training set.
 
 \textbf{Rebalancing the training mixture.} The current mix ($\sim$95k MC-style,
@@ -633,13 +319,11 @@ vs.\ QA would allow each task to specialise its output format without contaminat
 % =============================================================================
 
 \textbf{Limitations.}
-(1)~Our model is not evaluated on the full ReasonAQA benchmark (MMAU, Audio Entailment,
-Audio Difference) because those tasks require AudioCaps, which was not available to us.
+(1)~Our model is not evaluated on the full ReasonAQA test set (Audio Entailment, Audio Difference) or on the separate MMAU benchmark, as these require AudioCaps, which was not available to us.
 Our results are therefore not directly comparable to the original Mellow paper.
 (2)~Clotho covers general environmental sounds; our model has no exposure to speech or music
 content. This limits its applicability to non-speech, non-music scenarios.
-(3)~The pairwise training targets are only weakly contrastive, limiting the model's ability
-to perform true comparative audio reasoning at inference time.
+(3)~Most training subtypes (Clotho-Detail, Clotho-MCQ) do not provide explicitly contrastive targets, limiting the model's ability to perform true comparative audio reasoning at inference time.
 
 \textbf{Broader impact.}
 Small audio language models like Mellow have positive applications in accessibility (e.g.,
@@ -654,22 +338,41 @@ high-stakes settings requires careful evaluation for hallucination and bias.
 \label{sec:conclusion}
 % =============================================================================
 
-We have adapted Mellow's dual-stream audio reasoning architecture to Clotho V2.1, training on
-pairwise comparison and captioning tasks with Clotho-only data. After resolving a series of
-distributed training and gradient stability failures, the model trained stably for 10 epochs
-and achieves CIDEr$=0.027$, BLEU-1$=0.052$, ROUGE-L$=0.086$ on the mixed validation set
-(best captioning checkpoint: epoch~9, CIDEr$=0.015$).
-t-SNE analysis of HTSAT embeddings reveals that the audio encoder produces semantically
-meaningful representations — animal, vehicle, and human voice clusters are well-separated —
-localising the performance gap to the cross-modal projection and language model rather than
-to audio understanding. The primary failure modes are MC-format contamination from training
-data imbalance and weak grounding caused by concatenative rather than contrastive training
-targets. Addressing these through training mixture rebalancing and LLM-generated contrastive
-targets are the most promising directions for future work.
+We reimplement Mellow and train it on six task subtypes from the Clotho portion of ReasonAQA (MCQ, detail captioning, audio difference, entailment, QA, and captioning) with Clotho-only data. After resolving a series of distributed training and gradient stability failures, the model trained stably for 10 epochs and achieves CIDEr$=0.027$, BLEU-1$=0.052$, ROUGE-L$=0.086$ on the mixed validation set (best captioning checkpoint: epoch~9, CIDEr$=0.015$).
+t-SNE analysis of HTSAT embeddings confirms that the frozen audio encoder produces semantically meaningful representations — animal, vehicle, and human voice clusters are well-separated — while the performance gap lies in the cross-modal projection and language model. The primary failure modes are MC-format contamination from training data imbalance and weak cross-modal grounding from the absence of explicitly contrastive training targets in the majority of task subtypes. Addressing these through training mixture rebalancing and LLM-generated contrastive targets are the most promising directions for future work.
 
-% =============================================================================
+
 \bibliographystyle{IEEEtran}
 \bibliography{references}
-% =============================================================================
+
+
+\newpage
+\newpage
+\begin{table}[h!]
+    \centering
+    \caption{Self-Consistency Accuracy Comparison ($n=2000$)}
+    \label{tab:sc_results}
+    \begin{threeparttable}
+    \setlength{\tabcolsep}{3pt}
+    \begin{tabular}{@{}cccc@{}}
+        \toprule
+        \textbf{N} & \textbf{Temperature} & \textbf{Our Model (Acc)} & \textbf{Mellow Model (Acc)} \\ \midrule
+        \multirow{3}{*}{1} & 1.0 (Baseline) & 27.15\% & 63.65\% \\
+                           & 0.7            & 35.7\%  & 66.45\% \\
+                           & 0.5            & 41.25\% & \textbf{66.8\%} \\ \midrule
+        \multirow{3}{*}{3} & 1.0            & 29.7\%  & 65.9\% \\
+                           & 0.7            & 40.5\%  & 66.05\% \\
+                           & 0.5            & 44\%    & 66.55\% \\ \midrule
+        \multirow{3}{*}{5} & 1.0            & 33.75\% & 65.5\% \\
+                           & 0.7            & 42.25\% & 66.3\% \\
+                           & 0.5            & \textbf{46.85\%}     & 66.75\% \\ \bottomrule
+    \end{tabular}
+    \begin{tablenotes}
+      \small
+      \item \textit{Comparison of model performance using self-consistency across varying sample sizes ($N$) and temperatures ($T$). Results indicate that Our Model benefits significantly from lower temperatures and higher sample counts, achieving a peak accuracy of 46.85\% at $N=5, T=0.5$. In contrast, the Mellow Original Model maintains a higher baseline accuracy but shows more stability across parameters, peaking at 66.8\% ($N=1, T=0.5$). Bold values indicate the highest accuracy achieved for each model.}
+    \end{tablenotes}
+    \end{threeparttable}
+\end{table}
+
 
 \end{document}
